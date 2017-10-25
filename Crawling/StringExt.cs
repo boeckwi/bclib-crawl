@@ -9,7 +9,7 @@ namespace Crawling
             return input.Split(new[] { separator }, 2);
         }
 
-        public static string[] SplitAtLast(this string input, char separator)
+        public static string[] SplitAtLastIndexOf(this string input, char separator)
         {
             var index = input.LastIndexOf(separator);
             if (index < 0) return new[] { input };

@@ -1,9 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Security.Policy;
 using System.Text.RegularExpressions;
+using System.Web;
+using System.Xml.Linq;
+using System.Xml.XPath;
 using FileHelpers;
 using HtmlAgilityPack;
 
@@ -19,7 +24,7 @@ namespace Crawling
         {
             while (true)
             {
-                Console.Write("Download, Clear or Transform? (d/c/t) ");
+                Console.Write("Download, Clear, Transform or Enrich? (d/c/t/e) ");
                 switch (Console.ReadLine())
                 {
                     case "c":
@@ -31,6 +36,9 @@ namespace Crawling
                     case "t":
                         StartTransform();
                         break;
+                    case "e":
+                        StartEnrich();
+                        break;
                 }
 
                 Console.WriteLine("done");
@@ -39,6 +47,77 @@ namespace Crawling
 
         }
 
+        static void StartEnrich()
+        {
+            var engine = new FileHelperEngine<CsvLine>();
+
+            var file = Directory.GetFiles("output", "*.csv").OrderByDescending(x => x).FirstOrDefault();
+
+            if (file == null)
+            {
+                Console.WriteLine("file not found");
+                return;
+            }
+
+            var lines = engine.ReadFile(file);
+
+            foreach (var line in lines)
+            {
+                if (line.BggId != 0) continue;
+
+                var query = ToQueryString(new NameValueCollection
+                {
+                    { "type", "boardgame" },
+                    { "search", line.Title.SplitAtLastIndexOf(':')[0].TrimEnd() },
+                    //{ "exact", "1" }
+                });
+                //var uri = new Uri(@"https://boardgamegeek.com/xmlapi2/search" + query);
+                var uri = new Uri(@"https://boardgamegeek.com/xmlapi/search" + query);
+                XDocument doc;
+                try
+                {
+                    doc = XDocument.Load(uri.ToString());
+                }
+                catch (WebException e)
+                {
+                    Console.WriteLine(e.Message);
+                    break;
+                }
+
+                var items = doc.XPathSelectElements("//boardgames/boardgame").ToArray();
+                var matches = items.Where(x => CompareElement(x, line.Year + "")).ToArray();
+                var match = matches.FirstOrDefault();
+                if (match != null)
+                {
+                    line.BggId = int.Parse(match.Attribute("objectid").Value);
+                }
+                else
+                {
+                    line.BggId = -1;
+                }
+                Console.WriteLine(line.Title + " -> " + line.BggId);
+            }
+
+            engine.WriteFile(file + ".enriched", lines);
+        }
+
+        static bool CompareElement(XElement x, string expected)
+        {
+            var el = x.Element("yearpublished");
+
+            if (el == null) return false;
+
+            return el.Value == expected;
+        }
+
+        static string ToQueryString(NameValueCollection nvc)
+        {
+            var array = (from key in nvc.AllKeys
+                         from value in nvc.GetValues(key)
+                         select string.Format("{0}={1}", HttpUtility.UrlEncode(key), HttpUtility.UrlEncode(value)))
+                .ToArray();
+            return "?" + string.Join("&", array);
+        }
         static void StartClear()
         {
             if (Directory.Exists("work"))
@@ -137,22 +216,24 @@ namespace Crawling
                 if (!datas.Any())
                     continue;
 
-                var title_cell = datas.ElementAtOrDefault(0);//<a href="ftitle.C?LANG=de&FUNC=full&SORTX=13&330238=YES"> <font color="black">Ben Hur <br>Hamburg: Universal Pictures Germany,<br><b>Filmkiste - Historisches</b></font></a>
+                var name_cell = datas.ElementAtOrDefault(0);//<a href="ftitle.C?LANG=de&FUNC=full&SORTX=13&330238=YES"> <font color="black">Ben Hur <br>Hamburg: Universal Pictures Germany,<br><b>Filmkiste - Historisches</b></font></a>
                 var year_cell = datas.ElementAtOrDefault(1); // 2017
                 var status_cell = datas.ElementAtOrDefault(2); // <font class="p02x09b">Stadtb&#252;cherei</font> <br>   p02x09b=rot   p04x09b=grün
 
                 try
                 {
                     var year = year_cell.InnerText;
-                    var title = HtmlEntity.DeEntitize(title_cell.Descendants("font").First().InnerText).RemoveMultipleWhitespaces();
+                    var name = HtmlEntity.DeEntitize(name_cell.Descendants("font").First().InnerText).RemoveMultipleWhitespaces();
                     var verliehen = HasClass(status_cell.Descendants("font").First(), "p02x09b");
 
-                    var title_split = title.SplitAtLast(',');
+                    var name_split = name.SplitAtLastIndexOf(',');
+                    var title_split = name_split[0].SplitAtLastIndexOf(':');
 
                     result.Add(new CsvLine
                     {
                         Title = title_split[0],
-                        Subtitle = title_split[1],
+                        Publisher = (title_split.ElementAtOrDefault(1) ?? "").TrimStart(),
+                        Subtitle = name_split[1],
                         Year = int.Parse(year),
                         Verliehen = verliehen
                     });
